@@ -138,7 +138,8 @@ static bool parse_json(const char* json, UsageData* out) {
 }
 
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 64
+// Large enough for a usage JSON line sent over USB (same limit as BLE).
+#define CMD_BUF_SIZE 512
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
@@ -180,12 +181,54 @@ static void send_screenshot() {
 #endif
 }
 
+// Parse one usage payload and push it to the UI. Shared by the BLE write
+// path and the USB serial path, so both behave identically.
+static bool apply_usage_json(const char* json) {
+    if (!parse_json(json, &usage)) return false;
+    int g_before = usage_rate_group();
+    bool session_reset = usage_rate_sample(usage.session_pct);
+    int g_after = usage_rate_group();
+    // 5-hour session limit refilled → chime so the user knows they can
+    // use Claude again (no-op on boards without a buzzer). Gated on the
+    // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
+    if (session_reset && usage.chime) {
+        Serial.println("session reset detected — chime");
+        sound_hal_play_reset();
+    }
+    // Host-driven animation. Sent only when the host is configured to
+    // mirror its desktop buddy; absent → "" → device keeps deciding.
+    splash_set_anim(usage.anim);
+    // Dieselbe Animation zusaetzlich klein in der Ecke des
+    // Usage-Screens, wenn der Host das moechte.
+    ui_set_screen_mode(usage.screen_mode);
+    // Nach dem Modus: im Auto-Modus loest ein neuer Zustandsname den
+    // kurzen Buddy aus, und dafuer muss der Modus schon stehen.
+    ui_set_host_anim(usage.anim);
+    ui_set_corner_creature(usage.corner_anim);
+    if (usage.corner_anim) ui_set_corner_anim(usage.anim);
+    if (g_after != g_before) {
+        Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+            g_before, g_after, usage.session_pct);
+        if (splash_is_active()) splash_pick_for_current_rate();
+    }
+    ui_update(&usage);
+    return true;
+}
+
 static void check_serial_cmd() {
     while (Serial.available()) {
         char c = Serial.read();
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
-            if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            // A host can also feed usage over the USB cable instead of BLE:
+            // one JSON object per line, answered with an ack/nack line. The
+            // "hello" probe lets the host tell a Clawdmeter from other ports.
+            if (cmd_buf[0] == '{') {
+                Serial.println(apply_usage_json(cmd_buf) ? "CLAWDMETER_ACK"
+                                                         : "CLAWDMETER_NACK");
+            }
+            else if (strcmp(cmd_buf, "hello") == 0) Serial.println("CLAWDMETER_HELLO");
+            else if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
             // Play the charge overlay without touching the cable — the real
             // trigger needs a USB transition, which is awkward to produce on a
@@ -444,38 +487,8 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
-            }
-            // Host-driven animation. Sent only when the host is configured to
-            // mirror its desktop buddy; absent → "" → device keeps deciding.
-            splash_set_anim(usage.anim);
-            // Dieselbe Animation zusaetzlich klein in der Ecke des
-            // Usage-Screens, wenn der Host das moechte.
-            ui_set_screen_mode(usage.screen_mode);
-            // Nach dem Modus: im Auto-Modus loest ein neuer Zustandsname den
-            // kurzen Buddy aus, und dafuer muss der Modus schon stehen.
-            ui_set_host_anim(usage.anim);
-            ui_set_corner_creature(usage.corner_anim);
-            if (usage.corner_anim) ui_set_corner_anim(usage.anim);
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
-            }
-            ui_update(&usage);
-            ble_send_ack();
-        } else {
-            ble_send_nack();
-        }
+        if (apply_usage_json(ble_get_data())) ble_send_ack();
+        else                                  ble_send_nack();
     }
 
     delay(5);

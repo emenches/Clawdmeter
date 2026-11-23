@@ -45,6 +45,24 @@ echo "Board: $BOARD"
 echo "Port:  $PORT"
 echo ""
 
+# Claude Session Browser talks to the device over this same USB port. Two
+# programs on one serial port garble the upload, so quit it for the flash and
+# start it again afterwards.
+APP_NAME="Claude Session Browser"
+APP_WAS_RUNNING=0
+if pgrep -f "$APP_NAME" >/dev/null 2>&1; then
+    APP_WAS_RUNNING=1
+    echo "Quitting $APP_NAME while flashing (it uses the USB port)..."
+    pkill -f "$APP_NAME" || true
+    sleep 2
+fi
+reopen_app() {
+    if [ "$APP_WAS_RUNNING" = 1 ]; then
+        open -a "$APP_NAME" || true
+    fi
+}
+trap reopen_app EXIT
+
 cd "$SCRIPT_DIR/firmware"
 "$PIO" run -e "$BOARD" -t upload --upload-port "$PORT"
 

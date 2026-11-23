@@ -703,10 +703,17 @@ void ui_update(const UsageData* data) {
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
 // reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+// A host counts as linked when BLE is connected or when usage arrived recently
+// by any route -- the host may be feeding data over the USB cable instead.
+static bool host_linked(void) {
+    return s_ble_connected ||
+           (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS);
+}
+
 static void update_view_state(void) {
     if (!usage_group || !pair_group || !idle_group) return;
     int v;
-    if (!s_ble_connected) {
+    if (!host_linked()) {
         v = 0;  // pairing hint
     } else if (data_received && (lv_tick_get() - last_data_ms) < DATA_FRESH_MS) {
         v = 2;  // live usage
@@ -807,7 +814,7 @@ void ui_tick_anim(void) {
     // sagen gibt. Ohne Verbindung und ohne Daten tritt die Zeile zurueck --
     // sie meldet dann nichts ueber Claude, sondern ueber sich selbst.
     lv_color_t col = COL_ACCENT;
-    if (!s_ble_connected) {
+    if (!host_linked()) {
         text = "Waiting";              // advertising / waiting for a host connection
         col = COL_DIM;
     } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
